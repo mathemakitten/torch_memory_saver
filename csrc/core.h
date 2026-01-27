@@ -16,23 +16,22 @@ enum class AllocationState {
 };
 
 struct AllocationMetadata {
-    size_t size;
-    CUdevice device;
-    std::string tag;
-    AllocationState state;
-    bool enable_cpu_backup;
-    void* cpu_backup;
-
-#if defined(USE_CUDA)
-    CUmemGenericAllocationHandle allocHandle;
-#elif defined(USE_ROCM)
-    size_t aligned_size;
-    std::vector<hipMemGenericAllocationHandle_t> allocHandles;
-    std::vector<size_t> chunk_sizes;
-#else
-    #error "USE_PLATFORM is not set"
-#endif
-};
+      size_t size;
+      CUdevice device;
+  #if defined(USE_CUDA)
+      CUmemGenericAllocationHandle allocHandle;
+  #elif defined(USE_ROCM)
+      size_t aligned_size;
+      std::vector<hipMemGenericAllocationHandle_t> allocHandles;
+      std::vector<size_t> chunk_sizes;
+  #else
+      #error "USE_PLATFORM is not set"
+  #endif
+      std::string tag;              // now position 4 (or 6 for ROCm)
+      AllocationState state;
+      bool enable_cpu_backup;
+      void* cpu_backup;
+  };
 
 #if defined(USE_ROCM)
 namespace DeviceUtils {
@@ -83,22 +82,11 @@ public:
     cudaError_t malloc(void** ptr, CUdevice device, size_t size, const std::string& tag, bool enable_cpu_backup);
     cudaError_t free(void* ptr);
 
-    // Synchronous API (existing - for backwards compatibility)
-    void pause(const std::string& tag = "");
-    void resume(const std::string& tag = "");
+    void pause(const std::string& tag);
+    void resume(const std::string& tag);
 
-    // Asynchronous API (new)
-    // These return immediately after launching async transfers.
-    // Caller must synchronize on the provided stream before:
-    //   - pause_async: accessing cpu_backup or assuming GPU memory is freed
-    //   - resume_async: using the GPU tensors
     void pause_async(const std::string& tag, cudaStream_t stream);
     void resume_async(const std::string& tag, cudaStream_t stream);
-
-    // Convenience: pause/resume with event recording for flexible sync
-    // Returns a cudaEvent that signals when the operation completes
-    cudaEvent_t pause_async_event(const std::string& tag, cudaStream_t stream);
-    cudaEvent_t resume_async_event(const std::string& tag, cudaStream_t stream);
 
 private:
     TorchMemorySaver();

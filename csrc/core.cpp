@@ -176,8 +176,16 @@ cudaError_t TorchMemorySaver::free(void *ptr) {
     return cudaSuccess;
 }
 
-void TorchMemorySaver::pause(const std::string& tag) {
+ void TorchMemorySaver::pause(const std::string& tag) {
+    // Synchronous wrapper - uses default stream and waits
+    pause_async(tag, 0);
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(0));
+}
+
+void TorchMemorySaver::pause_async(const std::string& tag, cudaStream_t stream) {
     const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
+
+
 
 #if defined(USE_ROCM)
     for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
@@ -292,8 +300,14 @@ void TorchMemorySaver::pause(const std::string& tag) {
 // ============================================================================
 // RESUME - Synchronous (backwards compatible)
 // ============================================================================
-void TorchMemorySaver::resume(const std::string& tag) {
-    const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
+ void TorchMemorySaver::resume(const std::string& tag) {
+    // Synchronous wrapper - uses default stream and waits
+    resume_async(tag, 0);
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(0));
+}
+
+void TorchMemorySaver::resume_async(const std::string& tag, cudaStream_t stream) {
+     const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
 #if defined(USE_ROCM)
     for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
