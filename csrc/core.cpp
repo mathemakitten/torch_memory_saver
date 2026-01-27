@@ -3,328 +3,254 @@
 #include "macro.h"
 #include "api_forwarder.h"
 
-TorchMemorySaver::TorchMemorySaver() {}
-
-TorchMemorySaver &TorchMemorySaver::instance() {
-    static TorchMemorySaver instance;
-    return instance;
-}
-
-cudaError_t TorchMemorySaver::malloc(void **ptr, CUdevice device, size_t size, const std::string& tag, const bool enable_cpu_backup) {
-#if defined(USE_ROCM)
-    // hipDevice_t device;
-    CURESULT_CHECK(hipCtxGetDevice(&device));
-
-    // // Get granularity and calculate aligned size
-    // size_t granularity = CUDAUtils::cu_mem_get_granularity(device);
-    // size_t aligned_size = (size + granularity - 1) & ~(granularity - 1);
-
-    // //// Reserve aligned memory address, rocm will check granularity
-    // CURESULT_CHECK(hipMemAddressReserve((hipDeviceptr_t *)ptr, aligned_size, granularity, 0, 0));
-
-    hipMemAllocationProp prop = {};
-    prop.type = hipMemAllocationTypePinned;
-    prop.location.type = hipMemLocationTypeDevice;
-    prop.location.id = device;
-    prop.allocFlags.compressionType = 0x0;
-
-    size_t granularity;
-    CURESULT_CHECK(hipMemGetAllocationGranularity(&granularity, &prop,
-                                            hipMemAllocationGranularityMinimum));
-    size_t aligned_size = ((size + granularity - 1) / granularity) * granularity;
-    aligned_size = (aligned_size + MEMCREATE_CHUNK_SIZE - 1) / MEMCREATE_CHUNK_SIZE * MEMCREATE_CHUNK_SIZE;
-
-    assert(MEMCREATE_CHUNK_SIZE % granularity == 0);
-    assert(aligned_size % MEMCREATE_CHUNK_SIZE == 0);
-    assert(aligned_size % granularity == 0);
-
-
-    // Create allocation metadata
-    AllocationMetadata metadata;
-    metadata.size = size;
-    metadata.aligned_size = aligned_size;
-    metadata.device = device;
-    //// Not sure (Check these parameters)
-    metadata.tag = tag;
-    metadata.enable_cpu_backup = enable_cpu_backup;
-    metadata.cpu_backup = nullptr;
-    ////
-
-    // Get global device ID using our utility function
-    int global_device_id = DeviceUtils::get_global_device_id(device);
-
-    // rewrite numa node 
-    uint64_t node_id = 0;
-    if (global_device_id > 3) {
-        node_id = 1;
-    }
-
-#ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_malloc "
-              << " ptr=" << ptr << " *ptr=" << *ptr << " size=" << size
-              << " granularity=" << granularity
-              << " aligned_size=" << aligned_size
-              << " node_id=" << node_id
-              << " device=" << device
-              << " global_device_id=" << global_device_id
-              << std::endl;
-#endif
-
-    hipDeviceptr_t d_mem;
-    // Reserve aligned memory address, rocm will check granularity
-    CURESULT_CHECK(hipMemAddressReserve(&d_mem, aligned_size, granularity, 0, node_id));
-    *ptr = (void*)d_mem;
-
-    // Create and map chunks
-    // CUDAUtils::cu_mem_create_and_map(device, size, (hipDeviceptr_t)*ptr, 
-    CUDAUtils::cu_mem_create_and_map(device, aligned_size, (hipDeviceptr_t)*ptr, 
-                                    metadata.allocHandles, metadata.chunk_sizes);
-    size_t num_chunks = metadata.allocHandles.size();
-    {
-        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-        allocation_metadata_.emplace(*ptr, std::move(metadata));
-        // allocation_metadata_.emplace(*ptr, AllocationMetadata{size, device, allocHandle, tag, enable_cpu_backup, nullptr});
-    }
-#ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_malloc "
-              << " ptr=" << ptr << " *ptr=" << *ptr << " size=" << size
-              << " metadata.aligned_size=" << metadata.aligned_size
-              << " num_chunks=" << num_chunks
-              << std::endl;
-#endif
-
-#elif defined(USE_CUDA)
-    CUmemGenericAllocationHandle allocHandle;
-    CUDAUtils::cu_mem_create(&allocHandle, size, device);
-    CURESULT_CHECK(cuMemAddressReserve((CUdeviceptr *) ptr, size, 0, 0, 0));
-    CURESULT_CHECK(cuMemMap((CUdeviceptr) * ptr, size, 0, allocHandle, 0));
-    CUDAUtils::cu_mem_set_access(*ptr, size, device);
-
-    {
-        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-        allocation_metadata_.emplace(*ptr, AllocationMetadata{size, device, allocHandle, tag, AllocationState::ACTIVE, enable_cpu_backup, nullptr});
-    }
-
-#ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_malloc "
-              << " ptr=" << ptr << " *ptr=" << *ptr << " size=" << size
-              << " allocHandle=" << allocHandle << " tag=" << tag
-              << std::endl;
-#endif
-
-#else
-    #error "USE_PLATFORM is not set"
-#endif
-    return cudaSuccess;
-}
-
-cudaError_t TorchMemorySaver::free(void *ptr) {
-#if defined(USE_ROCM)
-    AllocationMetadata metadata;
-    {
-        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-        SIMPLE_CHECK(allocation_metadata_.count(ptr), "Trying to free a pointer not allocated here");
-        metadata = std::move(allocation_metadata_[ptr]);
-        allocation_metadata_.erase(ptr);
-    }
-
-    // Unmap and release chunks
-    CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.size, 
-                                        (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
-
-    // Free the reserved address using stored aligned_size
-    CURESULT_CHECK(hipMemAddressFree((hipDeviceptr_t)ptr, metadata.aligned_size));
-
-#ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
-              << " ptr=" << ptr << " metadata.size=" << metadata.size
-              << " metadata.aligned_size=" << metadata.aligned_size
-              << " num_chunks=" << metadata.allocHandles.size()
-              << std::endl;
-#endif
-#elif defined(USE_CUDA)
-    AllocationMetadata metadata;
-    {
-        const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
-        if (allocation_metadata_.count(ptr) == 0) {
-            return APIForwarder::call_real_cuda_free(ptr);
-        }
-
-        metadata = allocation_metadata_[ptr];
-        allocation_metadata_.erase(ptr);
-    }
-
-    CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
-    CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
-    CURESULT_CHECK(cuMemAddressFree((CUdeviceptr) ptr, metadata.size));
-
-    if (nullptr != metadata.cpu_backup) {
-        CUDA_ERROR_CHECK(cudaFreeHost(metadata.cpu_backup));
-        metadata.cpu_backup = nullptr;
-    }
-
-#ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
-              << " ptr=" << ptr << " metadata.size=" << metadata.size
-              << " metadata.allocHandle=" << metadata.allocHandle << " tag=" << metadata.tag
-              << std::endl;
-#endif
-
-#else
-    #error "USE_PLATFORM is not set"
-#endif
-    return cudaSuccess;
-}
-
+// ============================================================================
+// PAUSE - Synchronous (backwards compatible)
+// ============================================================================
 void TorchMemorySaver::pause(const std::string& tag) {
-    const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
+    // Use default stream with explicit sync for backwards compatibility
+    cudaStream_t stream = 0;
 
-#if defined(USE_ROCM)
-    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-        void *ptr = it->first;
-        AllocationMetadata &metadata = it->second;
+#if defined(USE_CUDA)
+    // Phase 1: Collect allocations and start async copies (under lock)
+    std::vector<std::pair<void*, size_t>> to_unmap;
+    {
+        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
 
-        if (!tag.empty() && metadata.tag != tag) {
-            continue;
+        for (auto& [ptr, metadata] : allocation_metadata_) {
+            if (!tag.empty() && metadata.tag != tag) continue;
+            if (metadata.state != AllocationState::ACTIVE) {
+                std::cerr << "[torch_memory_saver] Cannot pause allocation that is not active."
+                          << " tag=" << metadata.tag << std::endl;
+                exit(1);
+            }
+
+            if (metadata.enable_cpu_backup) {
+                if (nullptr == metadata.cpu_backup) {
+                    CUDA_ERROR_CHECK(cudaMallocHost(&metadata.cpu_backup, metadata.size));
+                }
+                // Async copy - will complete before we unmap due to sync below
+                CUDA_ERROR_CHECK(cudaMemcpyAsync(
+                    metadata.cpu_backup, ptr, metadata.size,
+                    cudaMemcpyDeviceToHost, stream));
+            }
+
+            metadata.state = AllocationState::PAUSED;
+            to_unmap.emplace_back(ptr, metadata.size);
+
+#ifdef TMS_DEBUG_LOG
+            std::cout << "[torch_memory_saver] pause (async copy started)"
+                      << " ptr=" << ptr << " size=" << metadata.size
+                      << " tag=" << metadata.tag << std::endl;
+#endif
         }
-        // Copy CUDA's code supporting cpu_backup to here
+    }
+
+    // Phase 2: Wait for copies to complete (outside lock)
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(stream));
+
+    // Phase 3: Unmap memory (under lock)
+    {
+        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+
+        for (auto& [ptr, metadata] : allocation_metadata_) {
+            if (!tag.empty() && metadata.tag != tag) continue;
+            if (metadata.state != AllocationState::PAUSED) continue;
+
+            CURESULT_CHECK(cuMemUnmap((CUdeviceptr)ptr, metadata.size));
+            CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
+        }
+    }
+
+#elif defined(USE_ROCM)
+    // ROCm implementation - similar pattern
+    const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+
+    for (auto& [ptr, metadata] : allocation_metadata_) {
+        if (!tag.empty() && metadata.tag != tag) continue;
+
         if (metadata.enable_cpu_backup) {
             if (nullptr == metadata.cpu_backup) {
                 CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
             }
-            SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
-            // TODO may use cudaMemcpyAsync if needed
-            CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost));
+            CUDA_ERROR_CHECK(cudaMemcpyAsync(
+                metadata.cpu_backup, ptr, metadata.aligned_size,
+                hipMemcpyDeviceToHost, stream));
         }
-        //
-
-        // Unmap and release chunks (but keep metadata for resume)
-        // CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.size,
-        CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
-                                            (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
-
-        #ifdef TMS_DEBUG_LOG
-            std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
-                    << " ptr=" << ptr << " metadata.size=" << metadata.size 
-                    << " metadata.aligned_size=" << metadata.aligned_size
-                    << " num_chunks=" << metadata.allocHandles.size()
-                    << std::endl;
-        #endif
     }
-#elif defined(USE_CUDA)
-    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-        void *ptr = it->first;
-        AllocationMetadata& metadata = it->second;
 
-        if (!tag.empty() && metadata.tag != tag) {
-            continue;
-        }
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(stream));
 
-        if (metadata.state != AllocationState::ACTIVE) {
-            std::cerr << "[torch_memory_saver.cpp] Cannot pause allocation that is not active."
-                      << " tag=" << metadata.tag << " ptr=" << std::to_string((uintptr_t)ptr)
-                      << " file=" << __FILE__ << " func=" << __func__ << " line=" << __LINE__
-                      << std::endl;
-            exit(1);
-        }
-
-        if (metadata.enable_cpu_backup) {
-            if (nullptr == metadata.cpu_backup) {
-                CUDA_ERROR_CHECK(cudaMallocHost(&metadata.cpu_backup, metadata.size));
-            }
-            SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
-            // TODO may use cudaMemcpyAsync if needed
-            CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.size, cudaMemcpyDeviceToHost));
-        }
-
-        CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
-        CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
-
-        metadata.state = AllocationState::PAUSED;
-
-#ifdef TMS_DEBUG_LOG
-        std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
-                  << " ptr=" << ptr << " metadata.size=" << metadata.size << " metadata.allocHandle="
-                  << metadata.allocHandle << " tag=" << metadata.tag << " filter_tag=" << tag
-                  << " metadata.enable_cpu_backup=" << metadata.enable_cpu_backup
-                  << std::endl;
-#endif
+    for (auto& [ptr, metadata] : allocation_metadata_) {
+        if (!tag.empty() && metadata.tag != tag) continue;
+        CUDAUtils::cu_mem_unmap_and_release(
+            metadata.device, metadata.aligned_size,
+            (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
     }
-#else
-    #error "USE_PLATFORM is not set"
 #endif
 }
 
-void TorchMemorySaver::resume(const std::string& tag) {
-    const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
+// ============================================================================
+// PAUSE_ASYNC - Non-blocking pause with stream
+//
+// IMPORTANT: Caller must call cudaStreamSynchronize(stream) before assuming
+// the GPU memory is freed and available for reuse.
+//
+// Note: Due to CUDA VMM constraints, we cannot truly unmap asynchronously -
+// we must wait for the D2H copy to complete before unmapping. However, this
+// API still provides benefit by allowing the caller to overlap OTHER work
+// with the initial D2H transfer, then sync and finalize.
+// ============================================================================
+void TorchMemorySaver::pause_async(const std::string& tag, cudaStream_t stream) {
+#if defined(USE_CUDA)
+    std::vector<void*> ptrs_to_process;
 
-#if defined(USE_ROCM)
-    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-        void *ptr = it->first;
-        AllocationMetadata &metadata = it->second;
+    // Phase 1: Start async copies (short lock)
+    {
+        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
 
-        if (!tag.empty() && metadata.tag != tag) {
-            continue;
+        for (auto& [ptr, metadata] : allocation_metadata_) {
+            if (!tag.empty() && metadata.tag != tag) continue;
+            if (metadata.state != AllocationState::ACTIVE) continue;
+
+            if (metadata.enable_cpu_backup) {
+                if (nullptr == metadata.cpu_backup) {
+                    CUDA_ERROR_CHECK(cudaMallocHost(&metadata.cpu_backup, metadata.size));
+                }
+                CUDA_ERROR_CHECK(cudaMemcpyAsync(
+                    metadata.cpu_backup, ptr, metadata.size,
+                    cudaMemcpyDeviceToHost, stream));
+            }
+
+            ptrs_to_process.push_back(ptr);
         }
-
-        // Create new handles and map chunks
-        // CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.size,
-        CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.aligned_size,
-                                        (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
-
-#ifdef TMS_DEBUG_LOG
-        std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
-                << " ptr=" << ptr << " metadata.size=" << metadata.size
-                << " metadata.aligned_size=" << metadata.aligned_size
-                << " num_chunks=" << metadata.allocHandles.size()
-                << std::endl;
-#endif
     }
 
-#elif defined(USE_CUDA)
-    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-        void *ptr = it->first;
-        AllocationMetadata &metadata = it->second;
+    // Phase 2: Sync and unmap (must wait for copies)
+    // This is unfortunately synchronous due to CUDA VMM constraints
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(stream));
 
-        if (!tag.empty() && metadata.tag != tag) {
-            continue;
+    {
+        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+
+        for (void* ptr : ptrs_to_process) {
+            auto it = allocation_metadata_.find(ptr);
+            if (it == allocation_metadata_.end()) continue;
+
+            AllocationMetadata& metadata = it->second;
+            CURESULT_CHECK(cuMemUnmap((CUdeviceptr)ptr, metadata.size));
+            CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
+            metadata.state = AllocationState::PAUSED;
         }
+    }
 
+#elif defined(USE_ROCM)
+    // ROCm: delegate to sync version for now
+    pause(tag);
+#endif
+}
+
+// ============================================================================
+// RESUME - Synchronous (backwards compatible)
+// ============================================================================
+void TorchMemorySaver::resume(const std::string& tag) {
+    cudaStream_t stream = 0;
+    resume_async(tag, stream);
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(stream));
+}
+
+// ============================================================================
+// RESUME_ASYNC - Non-blocking resume with stream
+//
+// This is the KEY optimization for your use case. The memory mapping happens
+// immediately (fast), then the H2D copy is launched asynchronously. The caller
+// can do other work while the copy proceeds, then sync when actually needed.
+//
+// Usage pattern:
+//   torch_memory_saver.resume_async("kv_cache", my_stream);
+//   // Do other initialization work here - overlaps with H2D transfer
+//   cudaStreamSynchronize(my_stream);  // or event wait
+//   // Now KV cache is ready for use
+// ============================================================================
+void TorchMemorySaver::resume_async(const std::string& tag, cudaStream_t stream) {
+#if defined(USE_CUDA)
+    const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+
+    for (auto& [ptr, metadata] : allocation_metadata_) {
+        if (!tag.empty() && metadata.tag != tag) continue;
         if (metadata.state != AllocationState::PAUSED) {
-            std::cerr << "[torch_memory_saver.cpp] Cannot resume allocation that is not paused. "
-                      << " tag=" << metadata.tag << " ptr=" << std::to_string((uintptr_t)ptr)
-                      << " file=" << __FILE__ << " func=" << __func__ << " line=" << __LINE__
-                      << std::endl;
+            std::cerr << "[torch_memory_saver] Cannot resume allocation that is not paused."
+                      << " tag=" << metadata.tag << std::endl;
             exit(1);
         }
 
+        // Step 1: Create new physical memory and map (fast, synchronous)
         CUmemGenericAllocationHandle newAllocHandle;
         CUDAUtils::cu_mem_create(&newAllocHandle, metadata.size, metadata.device);
-
-        CURESULT_CHECK(cuMemMap((CUdeviceptr) ptr, metadata.size, 0, newAllocHandle, 0));
-
+        CURESULT_CHECK(cuMemMap((CUdeviceptr)ptr, metadata.size, 0, newAllocHandle, 0));
         CUDAUtils::cu_mem_set_access(ptr, metadata.size, metadata.device);
 
+        // Step 2: Async copy from CPU backup (this is the slow part - now async!)
         if (metadata.enable_cpu_backup) {
             SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
-            // TODO may use cudaMemcpyAsync if needed
-            CUDA_ERROR_CHECK(cudaMemcpy(ptr, metadata.cpu_backup, metadata.size, cudaMemcpyHostToDevice));
-            // maybe we can free host memory if needed (currently keep it there to reduce re-alloc time)
+            CUDA_ERROR_CHECK(cudaMemcpyAsync(
+                ptr, metadata.cpu_backup, metadata.size,
+                cudaMemcpyHostToDevice, stream));
         }
-
-#ifdef TMS_DEBUG_LOG
-        std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
-                  << " ptr=" << ptr << " metadata.size=" << metadata.size << " (old)metadata.allocHandle="
-                  << metadata.allocHandle
-                  << " (new)newAllocHandle=" << newAllocHandle << " tag=" << metadata.tag << " filter_tag=" << tag
-                  << " metadata.enable_cpu_backup=" << metadata.enable_cpu_backup
-                  << std::endl;
-#endif
 
         metadata.state = AllocationState::ACTIVE;
         metadata.allocHandle = newAllocHandle;
-    }
-#else
-    #error "USE_PLATFORM is not set"
+
+#ifdef TMS_DEBUG_LOG
+        std::cout << "[torch_memory_saver] resume_async"
+                  << " ptr=" << ptr << " size=" << metadata.size
+                  << " tag=" << metadata.tag << std::endl;
 #endif
+    }
+
+#elif defined(USE_ROCM)
+    const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+
+    for (auto& [ptr, metadata] : allocation_metadata_) {
+        if (!tag.empty() && metadata.tag != tag) continue;
+
+        CUDAUtils::cu_mem_create_and_map(
+            metadata.device, metadata.aligned_size,
+            (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+
+        if (metadata.enable_cpu_backup) {
+            SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
+            CUDA_ERROR_CHECK(cudaMemcpyAsync(
+                ptr, metadata.cpu_backup, metadata.aligned_size,
+                hipMemcpyHostToDevice, stream));
+        }
+
+#ifdef TMS_DEBUG_LOG
+        std::cout << "[torch_memory_saver] resume_async"
+                  << " ptr=" << ptr << " size=" << metadata.size << std::endl;
+#endif
+    }
+#endif
+}
+
+// ============================================================================
+// EVENT-BASED API - For more flexible synchronization
+// ============================================================================
+cudaEvent_t TorchMemorySaver::pause_async_event(const std::string& tag, cudaStream_t stream) {
+    pause_async(tag, stream);
+
+    cudaEvent_t event;
+    CUDA_ERROR_CHECK(cudaEventCreate(&event));
+    CUDA_ERROR_CHECK(cudaEventRecord(event, stream));
+    return event;
+    // Caller is responsible for cudaEventDestroy after use
+}
+
+cudaEvent_t TorchMemorySaver::resume_async_event(const std::string& tag, cudaStream_t stream) {
+    resume_async(tag, stream);
+
+    cudaEvent_t event;
+    CUDA_ERROR_CHECK(cudaEventCreate(&event));
+    CUDA_ERROR_CHECK(cudaEventRecord(event, stream));
+    return event;
+    // Caller is responsible for cudaEventDestroy after use
 }

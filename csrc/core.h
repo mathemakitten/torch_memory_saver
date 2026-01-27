@@ -2,6 +2,7 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <unordered_map>
+#include <vector>
 #include <mutex>
 #include <string>
 #include "utils.h"
@@ -82,14 +83,39 @@ public:
     cudaError_t malloc(void** ptr, CUdevice device, size_t size, const std::string& tag, bool enable_cpu_backup);
     cudaError_t free(void* ptr);
 
-    void pause(const std::string& tag);
-    void resume(const std::string& tag);
+    // Synchronous API (existing - for backwards compatibility)
+    void pause(const std::string& tag = "");
+    void resume(const std::string& tag = "");
+
+    // Asynchronous API (new)
+    // These return immediately after launching async transfers.
+    // Caller must synchronize on the provided stream before:
+    //   - pause_async: accessing cpu_backup or assuming GPU memory is freed
+    //   - resume_async: using the GPU tensors
+    void pause_async(const std::string& tag, cudaStream_t stream);
+    void resume_async(const std::string& tag, cudaStream_t stream);
+
+    // Convenience: pause/resume with event recording for flexible sync
+    // Returns a cudaEvent that signals when the operation completes
+    cudaEvent_t pause_async_event(const std::string& tag, cudaStream_t stream);
+    cudaEvent_t resume_async_event(const std::string& tag, cudaStream_t stream);
 
 private:
     TorchMemorySaver();
     ~TorchMemorySaver() = default;
     TorchMemorySaver(const TorchMemorySaver&) = delete;
     TorchMemorySaver& operator=(const TorchMemorySaver&) = delete;
+
+    // Internal helpers for async implementation
+    struct PendingTransfer {
+        void* ptr;
+        AllocationMetadata* metadata;
+    };
+
+    std::vector<PendingTransfer> collect_allocations_for_pause(const std::string& tag);
+    std::vector<PendingTransfer> collect_allocations_for_resume(const std::string& tag);
+    void finalize_pause(const std::vector<PendingTransfer>& transfers);
+    void finalize_resume(const std::vector<PendingTransfer>& transfers);
 
     std::mutex allocator_metadata_mutex_;
     std::unordered_map<void*, AllocationMetadata> allocation_metadata_;

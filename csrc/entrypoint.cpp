@@ -83,6 +83,41 @@ void tms_torch_free(void *ptr, ssize_t ssize, int device, cudaStream_t stream) {
     SIMPLE_CHECK(thread_local_config.is_interesting_region(), "only support interesting region");
     TorchMemorySaver::instance().free(ptr);
 }
+
+void tms_pause(const char* tag) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().pause(tag_str);
+}
+
+void tms_resume(const char* tag) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().resume(tag_str);
+}
+
+// ============================================================================
+// NEW: Async versions
+// ============================================================================
+
+void tms_pause_async(const char* tag, cudaStream_t stream) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().pause_async(tag_str, stream);
+}
+
+void tms_resume_async(const char* tag, cudaStream_t stream) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().resume_async(tag_str, stream);
+}
+
+// Convenience: version that takes stream as uint64_t for easier ctypes binding
+void tms_pause_async_raw(const char* tag, uint64_t stream_ptr) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    tms_pause_async(tag, stream);
+}
+
+void tms_resume_async_raw(const char* tag, uint64_t stream_ptr) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    tms_resume_async(tag, stream);
+}
 }
 #endif
 
@@ -108,15 +143,5 @@ bool tms_get_enable_cpu_backup() {
 
 void tms_set_enable_cpu_backup(bool enable_cpu_backup) {
     thread_local_config.set_enable_cpu_backup(enable_cpu_backup);
-}
-
-void tms_pause(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
-    TorchMemorySaver::instance().pause(tag_str);
-}
-
-void tms_resume(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
-    TorchMemorySaver::instance().resume(tag_str);
 }
 }
