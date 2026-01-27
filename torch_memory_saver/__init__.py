@@ -1,6 +1,8 @@
 from .entrypoint import TorchMemorySaver
 from .hooks.mode_preload import configure_subprocess
 
+from typing import Optional
+
 # Global singleton
 torch_memory_saver = TorchMemorySaver()
 
