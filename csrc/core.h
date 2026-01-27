@@ -106,17 +106,6 @@ private:
     TorchMemorySaver(const TorchMemorySaver&) = delete;
     TorchMemorySaver& operator=(const TorchMemorySaver&) = delete;
 
-    // Internal helpers for async implementation
-    struct PendingTransfer {
-        void* ptr;
-        AllocationMetadata* metadata;
-    };
-
-    std::vector<PendingTransfer> collect_allocations_for_pause(const std::string& tag);
-    std::vector<PendingTransfer> collect_allocations_for_resume(const std::string& tag);
-    void finalize_pause(const std::vector<PendingTransfer>& transfers);
-    void finalize_resume(const std::vector<PendingTransfer>& transfers);
-
     std::mutex allocator_metadata_mutex_;
     std::unordered_map<void*, AllocationMetadata> allocation_metadata_;
 };
