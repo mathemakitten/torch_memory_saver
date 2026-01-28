@@ -94,10 +94,6 @@ void tms_resume(const char* tag) {
     TorchMemorySaver::instance().resume(tag_str);
 }
 
-// ============================================================================
-// NEW: Async versions
-// ============================================================================
-
 void tms_pause_async(const char* tag, cudaStream_t stream) {
     std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
     TorchMemorySaver::instance().pause_async(tag_str, stream);

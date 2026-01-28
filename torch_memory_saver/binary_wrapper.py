@@ -33,6 +33,6 @@ def _setup_function_signatures(cdll):
     cdll.tms_pause.argtypes = [ctypes.c_char_p]
     cdll.tms_resume.argtypes = [ctypes.c_char_p]
 
-    # NEW: Async versions (stream passed as uint64_t pointer)
+    # Async versions (stream passed as uint64_t pointer)
     cdll.tms_pause_async_raw.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
     cdll.tms_resume_async_raw.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
