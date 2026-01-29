@@ -120,63 +120,64 @@ cudaError_t TorchMemorySaver::malloc(void **ptr, CUdevice device, size_t size, c
 
 cudaError_t TorchMemorySaver::free(void *ptr) {
 #if defined(USE_ROCM)
-  AllocationMetadata metadata;
-  {
-      const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-      SIMPLE_CHECK(allocation_metadata_.count(ptr), "Trying to free a pointer not allocated here");
-      metadata = std::move(allocation_metadata_[ptr]);
-      allocation_metadata_.erase(ptr);
-  }
+    AllocationMetadata metadata;
+    {
+        const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+        SIMPLE_CHECK(allocation_metadata_.count(ptr), "Trying to free a pointer not allocated here");
+        metadata = std::move(allocation_metadata_[ptr]);
+        allocation_metadata_.erase(ptr);
+    }
 
-  CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.size,
-                                      (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+    // Unmap and release chunks
+    CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.size,
+                                        (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
 
-  CURESULT_CHECK(hipMemAddressFree((hipDeviceptr_t)ptr, metadata.aligned_size));
+    // Free the reserved address using stored aligned_size
+    CURESULT_CHECK(hipMemAddressFree((hipDeviceptr_t)ptr, metadata.aligned_size));
 
 #ifdef TMS_DEBUG_LOG
-  std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
-            << " ptr=" << ptr << " metadata.size=" << metadata.size
-            << " metadata.aligned_size=" << metadata.aligned_size
-            << " num_chunks=" << metadata.allocHandles.size()
-            << std::endl;
+    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
+              << " ptr=" << ptr << " metadata.size=" << metadata.size
+              << " metadata.aligned_size=" << metadata.aligned_size
+              << " num_chunks=" << metadata.allocHandles.size()
+              << std::endl;
 #endif
-
 #elif defined(USE_CUDA)
-  AllocationMetadata metadata;
-  {
-      const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-      if (allocation_metadata_.count(ptr) == 0) {
-          return APIForwarder::call_real_cuda_free(ptr);
-      }
+    AllocationMetadata metadata;
+    {
+        const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
+        if (allocation_metadata_.count(ptr) == 0) {
+            return APIForwarder::call_real_cuda_free(ptr);
+        }
 
-      metadata = allocation_metadata_[ptr];
-      allocation_metadata_.erase(ptr);
-  }
+        metadata = allocation_metadata_[ptr];
+        allocation_metadata_.erase(ptr);
+    }
 
-  CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
-  CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
-  CURESULT_CHECK(cuMemAddressFree((CUdeviceptr) ptr, metadata.size));
+    CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
+    CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
+    CURESULT_CHECK(cuMemAddressFree((CUdeviceptr) ptr, metadata.size));
 
-  if (nullptr != metadata.cpu_backup) {
-      CUDA_ERROR_CHECK(cudaFreeHost(metadata.cpu_backup));
-      metadata.cpu_backup = nullptr;
-  }
+    if (nullptr != metadata.cpu_backup) {
+        CUDA_ERROR_CHECK(cudaFreeHost(metadata.cpu_backup));
+        metadata.cpu_backup = nullptr;
+    }
 
 #ifdef TMS_DEBUG_LOG
-  std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
-            << " ptr=" << ptr << " metadata.size=" << metadata.size
-            << " metadata.allocHandle=" << metadata.allocHandle << " tag=" << metadata.tag
-            << std::endl;
+    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.cuda_free "
+              << " ptr=" << ptr << " metadata.size=" << metadata.size
+              << " metadata.allocHandle=" << metadata.allocHandle << " tag=" << metadata.tag
+              << std::endl;
 #endif
 
 #else
-  #error "USE_PLATFORM is not set"
+    #error "USE_PLATFORM is not set"
 #endif
-  return cudaSuccess;
+    return cudaSuccess;
 }
 
 void TorchMemorySaver::pause(const std::string& tag) {
-  const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+    const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
 #if defined(USE_CUDA)
   for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
