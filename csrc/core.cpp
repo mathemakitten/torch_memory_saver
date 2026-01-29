@@ -345,24 +345,50 @@ void TorchMemorySaver::pause_async(const std::string& tag, cudaStream_t stream) 
 }
 
 void TorchMemorySaver::resume(const std::string& tag) {
-  resume_async(tag, 0);
-  CUDA_ERROR_CHECK(cudaStreamSynchronize(0));
+#if defined(USE_ROCM)
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it->first;
+        AllocationMetadata &metadata = it->second;
+
+        if (!tag.empty() && metadata.tag != tag) {
+            continue;
+        }
+
+        // Create new handles and map chunks
+        // CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.size,
+        CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.aligned_size,
+                                        (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+#ifdef TMS_DEBUG_LOG
+    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
+            << " ptr=" << ptr << " metadata.size=" << metadata.size
+            << " metadata.aligned_size=" << metadata.aligned_size
+            << " num_chunks=" << metadata.allocHandles.size()
+            << std::endl;
+#endif
+    }
+#elif defined(USE_CUDA)
+    resume_async(tag, 0);
+    CUDA_ERROR_CHECK(cudaStreamSynchronize(0));
+#endif
 }
+
 
 void TorchMemorySaver::resume_async(const std::string& tag, cudaStream_t stream) {
   const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
 
 #if defined(USE_ROCM)
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata &metadata = it->second;
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it->first;
+        AllocationMetadata &metadata = it->second;
 
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
+        if (!tag.empty() && metadata.tag != tag) {
+            continue;
+        }
 
-      CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.aligned_size,
-                                      (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+        // Create new handles and map chunks
+        // CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.size,
+        CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.aligned_size,
+                                        (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
 
 #ifdef TMS_DEBUG_LOG
       std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume_async"
@@ -371,7 +397,6 @@ void TorchMemorySaver::resume_async(const std::string& tag, cudaStream_t stream)
                 << " num_chunks=" << metadata.allocHandles.size()
                 << std::endl;
 #endif
-
       if (metadata.enable_cpu_backup) {
           SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
           CUDA_ERROR_CHECK(cudaMemcpyAsync(ptr, metadata.cpu_backup, metadata.aligned_size, hipMemcpyHostToDevice, stream));
