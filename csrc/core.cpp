@@ -179,7 +179,27 @@ cudaError_t TorchMemorySaver::free(void *ptr) {
 void TorchMemorySaver::pause(const std::string& tag) {
     const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
-#if defined(USE_CUDA)
+#if defined(USE_ROCM)
+  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+      void *ptr = it->first;
+      AllocationMetadata &metadata = it->second;
+
+      if (!tag.empty() && metadata.tag != tag) {
+          continue;
+      }
+
+      if (metadata.enable_cpu_backup) {
+          if (nullptr == metadata.cpu_backup) {
+              CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
+          }
+          CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost));
+      }
+
+      CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
+                                          (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+  }
+
+#elif defined(USE_CUDA)
   for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
       void *ptr = it->first;
       AllocationMetadata& metadata = it->second;
@@ -210,26 +230,6 @@ void TorchMemorySaver::pause(const std::string& tag) {
                 << " ptr=" << ptr << " metadata.size=" << metadata.size
                 << " tag=" << metadata.tag << std::endl;
 #endif
-  }
-
-#elif defined(USE_ROCM)
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata &metadata = it->second;
-
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
-
-      if (metadata.enable_cpu_backup) {
-          if (nullptr == metadata.cpu_backup) {
-              CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
-          }
-          CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost));
-      }
-
-      CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
-                                          (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
   }
 #endif
 }
