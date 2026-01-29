@@ -211,39 +211,46 @@ void TorchMemorySaver::pause(const std::string& tag) {
                     << std::endl;
         #endif
     }
-
 #elif defined(USE_CUDA)
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata& metadata = it->second;
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it->first;
+        AllocationMetadata& metadata = it->second;
 
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
+        if (!tag.empty() && metadata.tag != tag) {
+            continue;
+        }
 
-      if (metadata.state != AllocationState::ACTIVE) {
-          std::cerr << "[torch_memory_saver.cpp] Cannot pause allocation that is not active."
-                    << " tag=" << metadata.tag << std::endl;
-          exit(1);
-      }
+        if (metadata.state != AllocationState::ACTIVE) {
+            std::cerr << "[torch_memory_saver.cpp] Cannot pause allocation that is not active."
+                      << " tag=" << metadata.tag << " ptr=" << std::to_string((uintptr_t)ptr)
+                      << " file=" << __FILE__ << " func=" << __func__ << " line=" << __LINE__
+                      << std::endl;
+            exit(1);
+        }
 
-      if (metadata.enable_cpu_backup) {
-          if (nullptr == metadata.cpu_backup) {
-              CUDA_ERROR_CHECK(cudaMallocHost(&metadata.cpu_backup, metadata.size));
-          }
-          CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.size, cudaMemcpyDeviceToHost));
-      }
+        if (metadata.enable_cpu_backup) {
+            if (nullptr == metadata.cpu_backup) {
+                CUDA_ERROR_CHECK(cudaMallocHost(&metadata.cpu_backup, metadata.size));
+            }
+            SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
+            CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.size, cudaMemcpyDeviceToHost));
+        }
 
-      CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
-      CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
-      metadata.state = AllocationState::PAUSED;
+        CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
+        CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
 
-    #ifdef TMS_DEBUG_LOG
-          std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
-                    << " ptr=" << ptr << " metadata.size=" << metadata.size
-                    << " tag=" << metadata.tag << std::endl;
-    #endif
-  }
+        metadata.state = AllocationState::PAUSED;
+
+#ifdef TMS_DEBUG_LOG
+        std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
+                  << " ptr=" << ptr << " metadata.size=" << metadata.size << " metadata.allocHandle="
+                  << metadata.allocHandle << " tag=" << metadata.tag << " filter_tag=" << tag
+                  << " metadata.enable_cpu_backup=" << metadata.enable_cpu_backup
+                  << std::endl;
+#endif
+    }
+#else
+    #error "USE_PLATFORM is not set"
 #endif
 }
 
