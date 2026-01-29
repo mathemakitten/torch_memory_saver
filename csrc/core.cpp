@@ -180,24 +180,37 @@ void TorchMemorySaver::pause(const std::string& tag) {
     const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
 #if defined(USE_ROCM)
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata &metadata = it->second;
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it->first;
+        AllocationMetadata &metadata = it->second;
 
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
+        if (!tag.empty() && metadata.tag != tag) {
+            continue;
+        }
+        // Copy CUDA's code supporting cpu_backup to here
+        if (metadata.enable_cpu_backup) {
+            if (nullptr == metadata.cpu_backup) {
+                CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
+            }
+            SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
+            // TODO may use cudaMemcpyAsync if needed
+            CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost));
+        }
+        //
 
-      if (metadata.enable_cpu_backup) {
-          if (nullptr == metadata.cpu_backup) {
-              CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
-          }
-          CUDA_ERROR_CHECK(cudaMemcpy(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost));
-      }
+        // Unmap and release chunks (but keep metadata for resume)
+        // CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.size,
+        CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
+                                            (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
 
-      CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
-                                          (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
-  }
+        #ifdef TMS_DEBUG_LOG
+            std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
+                    << " ptr=" << ptr << " metadata.size=" << metadata.size
+                    << " metadata.aligned_size=" << metadata.aligned_size
+                    << " num_chunks=" << metadata.allocHandles.size()
+                    << std::endl;
+        #endif
+    }
 
 #elif defined(USE_CUDA)
   for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
@@ -225,11 +238,11 @@ void TorchMemorySaver::pause(const std::string& tag) {
       CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
       metadata.state = AllocationState::PAUSED;
 
-#ifdef TMS_DEBUG_LOG
-      std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
-                << " ptr=" << ptr << " metadata.size=" << metadata.size
-                << " tag=" << metadata.tag << std::endl;
-#endif
+    #ifdef TMS_DEBUG_LOG
+          std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
+                    << " ptr=" << ptr << " metadata.size=" << metadata.size
+                    << " tag=" << metadata.tag << std::endl;
+    #endif
   }
 #endif
 }
