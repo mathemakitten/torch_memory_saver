@@ -258,49 +258,7 @@ void TorchMemorySaver::pause_async(const std::string& tag, cudaStream_t stream) 
   const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
 
 #if defined(USE_ROCM)
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata &metadata = it->second;
-
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
-
-      if (metadata.enable_cpu_backup) {
-          if (nullptr == metadata.cpu_backup) {
-              CUDA_ERROR_CHECK(hipMallocHost(&metadata.cpu_backup, metadata.aligned_size));
-          }
-          SIMPLE_CHECK(metadata.cpu_backup != nullptr, "cpu_backup should not be nullptr");
-          CUDA_ERROR_CHECK(cudaMemcpyAsync(metadata.cpu_backup, ptr, metadata.aligned_size, hipMemcpyDeviceToHost, stream));
-      }
-
-#ifdef TMS_DEBUG_LOG
-      std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause_async (copy started)"
-                << " ptr=" << ptr << " metadata.size=" << metadata.size
-                << " metadata.aligned_size=" << metadata.aligned_size
-                << std::endl;
-#endif
-  }
-
-  CUDA_ERROR_CHECK(cudaStreamSynchronize(stream));
-
-  for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
-      void *ptr = it->first;
-      AllocationMetadata &metadata = it->second;
-
-      if (!tag.empty() && metadata.tag != tag) {
-          continue;
-      }
-
-      CUDAUtils::cu_mem_unmap_and_release(metadata.device, metadata.aligned_size,
-                                          (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
-
-#ifdef TMS_DEBUG_LOG
-      std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause_async (unmapped)"
-                << " ptr=" << ptr << std::endl;
-#endif
-  }
-
+  throw std::runtime_error("ROCm is not yet supported in pause_async");
 #elif defined(USE_CUDA)
   // Phase 1: Start async copies (memory still mapped)
   for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
