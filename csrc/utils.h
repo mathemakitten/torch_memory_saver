@@ -57,11 +57,11 @@
 namespace CUDAUtils {
 #if defined(USE_ROCM)
 
-    #if HIP_VERSION >= 60402000 // rocm/hip 6.4.2
-        #pragma message "Using ROCm/HIP 6.4.2+ implementation"
-        // Implement when rocm release >= 6.4.2 version
+    #if HIP_VERSION < 60304000 // rocm/hip 6.3.4
+        #pragma message "You need to implement torch_memory_saver in ROCm/HIP 6.3.4 or lower. We did not support it currently."
     #else
-        #pragma message "Using ROCm/HIP < 6.4.2 implementation"
+        // After rocm-7.0, we can use the same way to implement torch_memory_saver as CUDA side. --> Need to verify
+        #pragma message "Using ROCm/HIP >= 6.4.2 implementation"
         // hipMemCreate currently has issue in rocm-6.3.4. After it is fixed in rocm-7.0, we can use the same way to implement torch_memory_saver as CUDA side.
         // Current, we based on the chuck-wise method to implement it.
         static void cu_mem_create_and_map(hipDevice_t device, 
@@ -179,12 +179,26 @@ namespace CUDAUtils {
     #endif
 
 #elif defined(USE_CUDA)
-    static void cu_mem_create(CUmemGenericAllocationHandle *alloc_handle, size_t size, CUdevice device) {
+    static cudaError_t cu_mem_create(CUmemGenericAllocationHandle *alloc_handle, size_t size, CUdevice device) {
         CUmemAllocationProp prop = {};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         prop.location.id = device;
-        CURESULT_CHECK(cuMemCreate(alloc_handle, size, &prop, 0));
+
+        int flag = 0;
+        CURESULT_CHECK(cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device));
+        if (flag) {  // support GPUDirect RDMA if possible
+            prop.allocFlags.gpuDirectRDMACapable = 1;
+        }
+
+        CUresult ret = cuMemCreate(alloc_handle, size, &prop, 0);
+        if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+            std::cerr << "[torch_memory_saver.cpp] cuMemCreate CUDA_ERROR_OUT_OF_MEMORY (may not be an issue e.g. torch allocator will free cache and retry)" << std::endl;
+            return cudaErrorMemoryAllocation;
+        }
+        CURESULT_CHECK(ret);
+
+        return cudaSuccess;
     }
 
     static void cu_mem_set_access(void *ptr, size_t size, CUdevice device) {

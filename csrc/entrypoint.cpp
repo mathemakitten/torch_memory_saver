@@ -51,11 +51,7 @@ cudaError_t cudaMalloc(void **ptr, size_t size) {
 }
 
 cudaError_t cudaFree(void *ptr) {
-    if (thread_local_config.is_interesting_region()) {
-        return TorchMemorySaver::instance().free(ptr);
-    } else {
-        return APIForwarder::call_real_cuda_free(ptr);
-    }
+    return TorchMemorySaver::instance().free(ptr);
 }
 #endif
 
@@ -63,35 +59,25 @@ cudaError_t cudaFree(void *ptr) {
 extern "C" {
 void *tms_torch_malloc(ssize_t size, int device, cudaStream_t stream) {
 #ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] tms_torch_malloc "
+    std::cout << "[torch_memory_saver.cpp] entrypoint::tms_torch_malloc "
               << " size=" << size << " device=" << device << " stream=" << stream
               << std::endl;
 #endif
     SIMPLE_CHECK(thread_local_config.is_interesting_region(), "only support interesting region");
     void *ptr;
-    TorchMemorySaver::instance().malloc(
-        &ptr, CUDAUtils::cu_device_get(device), size, thread_local_config.current_tag_, thread_local_config.enable_cpu_backup());
+    CUDA_ERROR_CHECK(TorchMemorySaver::instance().malloc(
+        &ptr, CUDAUtils::cu_device_get(device), size, thread_local_config.current_tag_, thread_local_config.enable_cpu_backup()));
     return ptr;
 }
 
 void tms_torch_free(void *ptr, ssize_t ssize, int device, cudaStream_t stream) {
 #ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] tms_torch_free "
+    std::cout << "[torch_memory_saver.cpp] entrypoint::tms_torch_free "
               << " ptr=" << ptr << " ssize=" << ssize << " device=" << device << " stream=" << stream
               << std::endl;
 #endif
     SIMPLE_CHECK(thread_local_config.is_interesting_region(), "only support interesting region");
-    TorchMemorySaver::instance().free(ptr);
-}
-
-void tms_pause(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
-    TorchMemorySaver::instance().pause(tag_str);
-}
-
-void tms_resume(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
-    TorchMemorySaver::instance().resume(tag_str);
+    CUDA_ERROR_CHECK(TorchMemorySaver::instance().free(ptr));
 }
 
 void tms_pause_async(const char* tag, cudaStream_t stream) {
@@ -139,5 +125,23 @@ bool tms_get_enable_cpu_backup() {
 
 void tms_set_enable_cpu_backup(bool enable_cpu_backup) {
     thread_local_config.set_enable_cpu_backup(enable_cpu_backup);
+}
+
+void set_memory_margin_bytes(uint64_t value) {
+    TorchMemorySaver::instance().set_memory_margin_bytes(value);
+}
+
+void tms_pause(const char* tag) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().pause(tag_str);
+}
+
+void tms_resume(const char* tag) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().resume(tag_str);
+}
+
+uint8_t* tms_get_cpu_backup_pointer(const uint8_t* gpu_ptr, uint64_t size) {
+    return TorchMemorySaver::instance().get_cpu_backup_pointer(gpu_ptr, size);
 }
 }

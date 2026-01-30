@@ -1,6 +1,9 @@
 import ctypes
+
+import numpy as np
 import logging
 import os
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Optional, Union
 import torch
@@ -128,6 +131,19 @@ class TorchMemorySaver:
         assert self._impl_ctor_kwargs is not None, "Cannot configure after initialization"
         self._impl_ctor_kwargs["hook_mode"] = hook_mode
 
+    @property
+    def memory_margin_bytes(self):
+        raise NotImplementedError("Only setter is supported")
+
+    @memory_margin_bytes.setter
+    def memory_margin_bytes(self, value: int):
+        self._ensure_initialized()
+        self._impl._binary_wrapper.cdll.set_memory_margin_bytes(value)
+
+    def get_cpu_backup(self, x: torch.Tensor, zero_copy: bool = False):
+        self._ensure_initialized()
+        return self._impl.get_cpu_backup(x, zero_copy=zero_copy)
+
     def _ensure_initialized(self):
         if self._impl is not None:
             return
@@ -140,12 +156,15 @@ class _TorchMemorySaverImpl:
         self._hook_mode = hook_mode
         self._hook_util = HookUtilBase.create(hook_mode=hook_mode)
         self._binary_wrapper = BinaryWrapper(path_binary=self._hook_util.get_path_binary())
-        self._primary_mem_pool = torch.cuda.MemPool(allocator=self._hook_util.get_allocator())
+        self._mem_pools = defaultdict(lambda: torch.cuda.MemPool(allocator=self._hook_util.get_allocator()))
         _sanity_checks()
 
     @contextmanager
     def region(self, tag: str, enable_cpu_backup: bool):
-        with torch.cuda.use_mem_pool(self._primary_mem_pool):
+        # For hook_mode=preload, we need this b/c https://github.com/fzyzcjy/torch_memory_saver/pull/20#issuecomment-3047099047
+        # (For hook_mode=torch we may not need it, but currently our primary usage is hook_mode=preload, thus we do this for simplicity)
+        mem_pool = self._mem_pools[(tag, enable_cpu_backup)]
+        with torch.cuda.use_mem_pool(mem_pool):
             with self._with_region_config(tag=tag, enable_cpu_backup=enable_cpu_backup):
                 yield
 
@@ -203,6 +222,31 @@ class _TorchMemorySaverImpl:
         stream_ptr = stream.cuda_stream  # Get raw cudaStream_t as int
         self._binary_wrapper.cdll.tms_resume_async_raw(tag_bytes, stream_ptr)
 
+    def get_cpu_backup(self, x: torch.Tensor, zero_copy: bool = False):
+        assert x.is_cuda, f"{x.device=}"
+        assert x.is_contiguous(), f"{x.shape=} {x.stride()=} {x.dtype=}"
+
+        nbytes = x.nbytes
+        gpu_ptr = ctypes.cast(x.data_ptr(), ctypes.POINTER(ctypes.c_uint8))
+        cpu_ptr = self._binary_wrapper.cdll.tms_get_cpu_backup_pointer(gpu_ptr, nbytes)
+        if not cpu_ptr:
+            return None
+
+        np_untyped = np.ctypeslib.as_array(cpu_ptr, shape=(nbytes,))
+        assert np_untyped.dtype == np.uint8, f"{np_untyped.dtype=} {np_untyped.shape=}"
+
+        ans_untyped = torch.from_numpy(np_untyped)
+        ans = ans_untyped.view(x.dtype).view(x.shape)
+
+        # For simplicity and safety
+        if not zero_copy:
+            ans = ans.clone()
+
+        assert ans.device == torch.device("cpu"), f"{ans.device=}"
+        assert ans.dtype == x.dtype, f"{ans.dtype=} {x.dtype=}"
+        assert ans.shape == x.shape, f"{ans.shape=} {x.shape=}"
+        assert ans.stride() == x.stride(), f"{ans.stride()=} {x.stride()=}"
+        return ans
 
 def _sanity_checks():
     if "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):

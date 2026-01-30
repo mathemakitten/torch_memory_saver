@@ -87,11 +87,17 @@ def _create_ext_modules(platform):
     
     # Common define macros
     common_macros = [('Py_LIMITED_API', '0x03090000')]
+
+    # Common compile arguments
+    extra_compile_args = ['-std=c++17', '-O3']
     
     # Platform-specific configurations
     platform_home = Path(_find_platform_home(platform))
     
     if platform == "hip":
+        # Add ROCm-specific source file
+        sources.append('csrc/hardware_amd_support.cpp')
+        
         include_dirs = [str(platform_home.resolve() / 'include')]
         library_dirs = [str(platform_home.resolve() / 'lib')]
         libraries = ['amdhip64', 'dl']
@@ -102,7 +108,7 @@ def _create_ext_modules(platform):
             str((platform_home / 'lib64').resolve()),
             str((platform_home / 'lib64/stubs').resolve()),
         ]
-        libraries = ['cuda']
+        libraries = ['cuda', 'cudart']
         platform_macros = [('USE_CUDA', '1')]
     
     # Create extensions with different hook modes
@@ -120,6 +126,7 @@ def _create_ext_modules(platform):
                 *extra_macros,
             ],
             py_limited_api=True,
+            extra_compile_args=extra_compile_args,
         )
         for name, extra_macros in [
             ('torch_memory_saver_hook_mode_preload', [('TMS_HOOK_MODE_PRELOAD', '1')]),
@@ -144,7 +151,7 @@ class build_ext_for_platform(build_platform_ext):
 
 setup(
     name='torch_memory_saver',
-    version='0.0.8',
+    version='0.0.9',
     ext_modules=ext_modules,
     cmdclass={'build_ext': build_ext_for_platform},
     python_requires=">=3.9",
