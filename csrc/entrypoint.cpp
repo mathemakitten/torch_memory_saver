@@ -79,6 +79,27 @@ void tms_torch_free(void *ptr, ssize_t ssize, int device, cudaStream_t stream) {
     SIMPLE_CHECK(thread_local_config.is_interesting_region(), "only support interesting region");
     CUDA_ERROR_CHECK(TorchMemorySaver::instance().free(ptr));
 }
+
+void tms_pause_async(const char* tag, cudaStream_t stream) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().pause_async(tag_str, stream);
+}
+
+void tms_resume_async(const char* tag, cudaStream_t stream) {
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    TorchMemorySaver::instance().resume_async(tag_str, stream);
+}
+
+// Convenience: version that takes stream as uint64_t for easier ctypes binding
+void tms_pause_async_raw(const char* tag, uint64_t stream_ptr) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    tms_pause_async(tag, stream);
+}
+
+void tms_resume_async_raw(const char* tag, uint64_t stream_ptr) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    tms_resume_async(tag, stream);
+}
 }
 #endif
 

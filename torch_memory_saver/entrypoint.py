@@ -5,7 +5,7 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Optional
+from typing import Optional, Union
 import torch
 
 from .binary_wrapper import BinaryWrapper
@@ -58,6 +58,64 @@ class TorchMemorySaver:
         """Resume memory for specific tag or all memory if tag is None"""
         self._ensure_initialized()
         self._impl.resume(tag=tag)
+
+    # Async versions
+    def pause_async(
+            self,
+            tag: Optional[str] = None,
+            stream: Optional["torch.cuda.Stream"] = None
+    ):
+        """
+        Pause memory asynchronously.
+
+        Note: Due to CUDA VMM constraints, this still blocks internally
+        after the D2H copy completes (must sync before unmapping).
+
+        Args:
+            tag: Filter to pause only allocations with this tag
+            stream: CUDA stream for the D2H copy. If None, uses current stream.
+        """
+        self._ensure_initialized()
+        if stream is None:
+            stream = torch.cuda.current_stream()
+        self._impl.pause_async(tag=tag, stream=stream)
+
+    def resume_async(
+            self,
+            tag: Optional[str] = None,
+            stream: Optional["torch.cuda.Stream"] = None
+    ):
+        """
+        Resume memory asynchronously.
+
+        Memory is mapped immediately (fast), then the H2D copy is launched
+        on the given stream. This function returns immediately - caller must
+        synchronize the stream before using the resumed tensors.
+
+        This allows the user to overlap the H2D transfer with other work.
+
+        Args:
+            tag: Filter to resume only allocations with this tag
+            stream: CUDA stream for the H2D copy. If None, uses current stream.
+
+        Example:
+            # Start async resume on a dedicated stream
+            stream = torch.cuda.Stream()
+            torch_memory_saver.resume_async("kv_cache", stream)
+
+            # Do other work while H2D transfer proceeds
+            cleanup_training_state()
+
+            # Sync only when you need the data
+            stream.synchronize()
+
+            # Now the KV cache is ready
+            run_inference()
+        """
+        self._ensure_initialized()
+        if stream is None:
+            stream = torch.cuda.current_stream()
+        self._impl.resume_async(tag=tag, stream=stream)
 
     # for compatibility
     @property
@@ -152,6 +210,17 @@ class _TorchMemorySaverImpl:
     def resume(self, tag: Optional[str]):
         tag_bytes = tag.encode("utf-8") if tag else None
         self._binary_wrapper.cdll.tms_resume(tag_bytes)
+
+    # Async versions
+    def pause_async(self, tag: Optional[str], stream: "torch.cuda.Stream"):
+        tag_bytes = tag.encode("utf-8") if tag else None
+        stream_ptr = stream.cuda_stream  # Get raw cudaStream_t as int
+        self._binary_wrapper.cdll.tms_pause_async_raw(tag_bytes, stream_ptr)
+
+    def resume_async(self, tag: Optional[str], stream: "torch.cuda.Stream"):
+        tag_bytes = tag.encode("utf-8") if tag else None
+        stream_ptr = stream.cuda_stream  # Get raw cudaStream_t as int
+        self._binary_wrapper.cdll.tms_resume_async_raw(tag_bytes, stream_ptr)
 
     def get_cpu_backup(self, x: torch.Tensor, zero_copy: bool = False):
         assert x.is_cuda, f"{x.device=}"

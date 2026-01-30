@@ -2,6 +2,7 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <unordered_map>
+#include <vector>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -20,23 +21,22 @@ enum class AllocationState {
 };
 
 struct AllocationMetadata {
-    size_t size;
-    CUdevice device;
-    std::string tag;
-    AllocationState state;
-    bool enable_cpu_backup;
-    void* cpu_backup;
-
-#if defined(USE_CUDA)
-    CUmemGenericAllocationHandle allocHandle;
-#elif defined(USE_ROCM)
-    size_t aligned_size;
-    std::vector<hipMemGenericAllocationHandle_t> allocHandles;
-    std::vector<size_t> chunk_sizes;
-#else
-    #error "USE_PLATFORM is not set"
-#endif
-};
+      size_t size;
+      CUdevice device;
+  #if defined(USE_CUDA)
+      CUmemGenericAllocationHandle allocHandle;
+  #elif defined(USE_ROCM)
+      size_t aligned_size;
+      std::vector<hipMemGenericAllocationHandle_t> allocHandles;
+      std::vector<size_t> chunk_sizes;
+  #else
+      #error "USE_PLATFORM is not set"
+  #endif
+      std::string tag;
+      AllocationState state;
+      bool enable_cpu_backup;
+      void* cpu_backup;
+  };
 
 class TorchMemorySaver {
 public:
@@ -51,6 +51,9 @@ public:
         memory_margin_bytes_.store(value);
     }
     uint8_t* get_cpu_backup_pointer(const uint8_t* query_gpu_ptr, uint64_t query_size);
+
+    void pause_async(const std::string& tag, cudaStream_t stream);
+    void resume_async(const std::string& tag, cudaStream_t stream);
 
 private:
     TorchMemorySaver();
