@@ -3,7 +3,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import Optional, Union
-import torch  # needed for torch.cuda.Stream type hint
+import torch
 
 from .binary_wrapper import BinaryWrapper
 from .hooks.base import HookUtilBase, HookMode
