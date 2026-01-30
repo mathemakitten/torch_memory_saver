@@ -89,7 +89,7 @@ class TorchMemorySaver:
         on the given stream. This function returns immediately - caller must
         synchronize the stream before using the resumed tensors.
 
-        This is the KEY optimization - overlap the H2D transfer with other work.
+        This allows the user to overlap the H2D transfer with other work.
 
         Args:
             tag: Filter to resume only allocations with this tag
@@ -102,7 +102,6 @@ class TorchMemorySaver:
 
             # Do other work while H2D transfer proceeds
             cleanup_training_state()
-            prepare_inputs()
 
             # Sync only when you need the data
             stream.synchronize()

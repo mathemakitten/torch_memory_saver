@@ -27,7 +27,7 @@ struct AllocationMetadata {
   #else
       #error "USE_PLATFORM is not set"
   #endif
-      std::string tag;              // now position 4 (or 6 for ROCm)
+      std::string tag;
       AllocationState state;
       bool enable_cpu_backup;
       void* cpu_backup;
