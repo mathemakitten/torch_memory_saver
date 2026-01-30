@@ -378,12 +378,13 @@ void TorchMemorySaver::resume(const std::string& tag) {
         // CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.size,
         CUDAUtils::cu_mem_create_and_map(metadata.device, metadata.aligned_size,
                                         (hipDeviceptr_t)ptr, metadata.allocHandles, metadata.chunk_sizes);
+
 #ifdef TMS_DEBUG_LOG
-    std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
-            << " ptr=" << ptr << " metadata.size=" << metadata.size
-            << " metadata.aligned_size=" << metadata.aligned_size
-            << " num_chunks=" << metadata.allocHandles.size()
-            << std::endl;
+        std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
+                << " ptr=" << ptr << " metadata.size=" << metadata.size
+                << " metadata.aligned_size=" << metadata.aligned_size
+                << " num_chunks=" << metadata.allocHandles.size()
+                << std::endl;
 #endif
     }
 #elif defined(USE_CUDA)
